@@ -159,6 +159,8 @@ pub struct App {
     /// The runtime key bindings (ADR-0003), with the config's `[keys]`
     /// section applied (Issue #339).
     keymap: crate::keymap::Keymap,
+    /// The first key of a two-key sequence, until the next key arrives.
+    pending_key: Option<crossterm::event::KeyEvent>,
 }
 
 impl App {
@@ -188,6 +190,8 @@ impl App {
             update_check_store,
             ..
         } = startup;
+        let mut directory_tree = DirectoryTreeState::default();
+        directory_tree.set_scrolloff(settings.scrolloff);
 
         Self {
             roots: Pair::new(
@@ -212,7 +216,7 @@ impl App {
             palette: PaletteState::default(),
             confirm_modal: None,
             status_message,
-            directory_tree: DirectoryTreeState::default(),
+            directory_tree,
             // A session starts on the left pane.
             active_side: Side::Left,
             update_available,
@@ -221,6 +225,7 @@ impl App {
             help: HelpState::default(),
             should_quit: false,
             keymap,
+            pending_key: None,
         }
     }
 
@@ -266,6 +271,17 @@ impl App {
     /// The runtime key bindings this session routes and hints from.
     pub(crate) fn keymap(&self) -> &crate::keymap::Keymap {
         &self.keymap
+    }
+
+    /// Hold `key` as the first key of a sequence until the next key arrives.
+    pub(crate) fn set_pending_key(&mut self, key: crossterm::event::KeyEvent) {
+        self.pending_key = Some(key);
+    }
+
+    /// The held first key of a sequence, clearing it: whatever the next key
+    /// is, the sequence is over.
+    pub(crate) fn take_pending_key(&mut self) -> Option<crossterm::event::KeyEvent> {
+        self.pending_key.take()
     }
 
     /// Replace the runtime key bindings, for tests that exercise a remap.

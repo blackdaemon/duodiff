@@ -426,8 +426,8 @@ impl ratatui::backend::Backend for RecordingBackend {
     }
 }
 
-/// Settings with the diff tool, update check, mouse, theme, diff context, and
-/// scan mode off their defaults, so a test can tell seeded values from the
+/// Settings with the diff tool, update check, mouse, theme, diff context,
+/// scrolloff, and scan mode off their defaults, so a test can tell seeded values from the
 /// defaults.
 pub fn seeded_settings() -> crate::settings::AppSettings {
     crate::settings::AppSettings {
@@ -438,6 +438,7 @@ pub fn seeded_settings() -> crate::settings::AppSettings {
         mouse: false,
         theme: crate::theme::ThemeChoice::Light,
         diff_context: 7,
+        scrolloff: 2,
         scan_mode: crate::settings::ScanMode::Precise,
         global_exclusions: crate::settings::AppSettings::default().global_exclusions,
         respect_gitignore: true,

@@ -4,7 +4,7 @@
 //! screen that binds it. An entry that cannot apply as written is ignored as a
 //! whole, the Command keeps its defaults, and the reason is reported.
 
-use super::{Binding, Chord, Keymap};
+use super::{Chord, Gesture, KeyAction, Keymap, MotionBinding};
 use crate::app::ViewMode;
 use crate::commands::Command;
 use crossterm::event::{KeyCode, KeyModifiers};
@@ -25,9 +25,38 @@ fn screen_name(screen: ViewMode) -> &'static str {
     }
 }
 
+/// What a `[keys]` entry binds: a Command, or a motion gesture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Target {
+    Command(Command),
+    Motion(Gesture),
+}
+
+impl Target {
+    fn from_config_name(name: &str) -> Option<Self> {
+        Command::from_config_name(name)
+            .map(Target::Command)
+            .or_else(|| super::gestures::motion_from_config_name(name).map(Target::Motion))
+    }
+
+    fn of(action: KeyAction) -> Self {
+        match action {
+            KeyAction::Command(command) => Target::Command(command),
+            KeyAction::Gesture(gesture) => Target::Motion(gesture),
+        }
+    }
+
+    fn config_name(self) -> Option<&'static str> {
+        match self {
+            Target::Command(command) => command.config_name(),
+            Target::Motion(gesture) => super::gestures::motion_config_name(gesture),
+        }
+    }
+}
+
 /// One `[keys]` entry that passed its own checks.
 struct Entry {
-    command: Command,
+    target: Target,
     name: String,
     chords: Vec<Chord>,
 }
@@ -65,8 +94,8 @@ impl Keymap {
 }
 
 fn parse_entry(defaults: &Keymap, name: &str, value: &toml::Value) -> Result<Entry, String> {
-    let command =
-        Command::from_config_name(name).ok_or_else(|| format!("no command is named `{name}`"))?;
+    let target = Target::from_config_name(name)
+        .ok_or_else(|| format!("no command or motion is named `{name}`"))?;
     let specs: Vec<&str> = match value {
         toml::Value::String(spec) => vec![spec.as_str()],
         toml::Value::Array(items) => items
@@ -78,25 +107,66 @@ fn parse_entry(defaults: &Keymap, name: &str, value: &toml::Value) -> Result<Ent
     };
     let mut chords: Vec<Chord> = Vec::new();
     for spec in specs {
-        let chord = parse_chord(spec)?;
+        let chord = parse_sequence(spec)?;
         if !chords.iter().any(|c| same_chord(c, &chord)) {
             chords.push(chord);
         }
     }
-    for screen in screens_binding(defaults, command) {
-        if let Some(chord) = chords.iter().find(|chord| reserved_on(screen, chord)) {
+    if let Some(first) = chords.iter().find_map(|chord| {
+        chord
+            .prefix_chord()
+            .filter(|first| chords.iter().any(|other| same_chord(other, first)))
+    }) {
+        return Err(format!(
+            "`{}` cannot both be a key and start a sequence",
+            super::format_chord(&first)
+        ));
+    }
+    let screens = match target {
+        Target::Command(command) => screens_binding(defaults, command),
+        Target::Motion(_) => super::gestures::MOTION_SCREENS.to_vec(),
+    };
+    for screen in screens {
+        // A sequence is reachable as long as its first key is.
+        if let Some(chord) = chords
+            .iter()
+            .map(|chord| chord.prefix_chord().unwrap_or(*chord))
+            .find(|chord| reserved_on(screen, chord))
+        {
             return Err(format!(
                 "`{}` is handled by {} itself and cannot be bound",
-                super::format_chord(chord),
+                super::format_chord(&chord),
                 screen_name(screen)
             ));
         }
     }
     Ok(Entry {
-        command,
+        target,
         name: name.to_string(),
         chords,
     })
+}
+
+/// Parse one entry key: a single key, or a two-key sequence written as the
+/// two keys apart (`"g g"`). A lone `" "` is the space bar, not a separator.
+fn parse_sequence(spec: &str) -> Result<Chord, String> {
+    let keys: Vec<&str> = if spec.trim().is_empty() {
+        vec![spec]
+    } else {
+        spec.split_whitespace().collect()
+    };
+    match keys.as_slice() {
+        [key] => parse_chord(key),
+        [first, second] => {
+            let first = parse_chord(first)?;
+            let second = parse_chord(second)?;
+            Ok(Chord {
+                prefix: Some((first.code, first.modifiers)),
+                ..second
+            })
+        }
+        _ => Err(format!("`{spec}`: a sequence is at most two keys")),
+    }
 }
 
 /// Parse one key: a single character taken literally (`"L"` is not `"l"`), or
@@ -132,6 +202,7 @@ pub(crate) fn parse_chord(spec: &str) -> Result<Chord, String> {
         code,
         modifiers,
         shown: true,
+        prefix: None,
     })
 }
 
@@ -164,7 +235,12 @@ fn named_key(name: &str) -> Option<KeyCode> {
 }
 
 fn same_chord(a: &Chord, b: &Chord) -> bool {
-    a.code == b.code && a.modifiers == b.modifiers
+    a.code == b.code && a.modifiers == b.modifiers && a.prefix == b.prefix
+}
+
+/// Whether `a` is the first key of `b`'s sequence, so `a` would never run.
+fn starts(a: &Chord, b: &Chord) -> bool {
+    b.prefix_chord().is_some_and(|first| same_chord(a, &first))
 }
 
 /// The screens whose defaults bind `command`; every screen for the global one.
@@ -193,6 +269,16 @@ pub(crate) fn reserved_on(screen: ViewMode, chord: &Chord) -> bool {
 fn apply(defaults: &Keymap, entries: &[Entry]) -> Keymap {
     let mut keymap = defaults.clone();
     for entry in entries {
+        let command = match entry.target {
+            Target::Command(command) => command,
+            Target::Motion(gesture) => {
+                keymap.motions.push(MotionBinding {
+                    gesture,
+                    chords: entry.chords.clone(),
+                });
+                continue;
+            }
+        };
         for table in [
             &mut keymap.global,
             &mut keymap.directory_tree,
@@ -200,55 +286,67 @@ fn apply(defaults: &Keymap, entries: &[Entry]) -> Keymap {
             &mut keymap.config_menu,
             &mut keymap.help,
         ] {
-            for binding in table.iter_mut().filter(|b| b.command == entry.command) {
+            for binding in table.iter_mut().filter(|b| b.command == command) {
                 binding.chords = entry.chords.clone();
             }
         }
-        keymap.customized.push(entry.command);
+        keymap.customized.push(command);
     }
     keymap
 }
 
 /// Entries to drop, by index, with the reason: a key that already runs
-/// another Command on the same screen. Against a default, only the entry goes;
-/// between two entries, both do.
+/// another Command or motion on the same screen, or that starts another's
+/// sequence. Against a default, only the entry goes; between two entries,
+/// both do.
 fn collisions(keymap: &Keymap, entries: &[Entry]) -> Vec<(usize, String)> {
-    let index_of = |command: Command| entries.iter().position(|e| e.command == command);
+    let index_of = |target: Target| entries.iter().position(|e| e.target == target);
     let mut rejected: Vec<(usize, String)> = Vec::new();
     for screen in SCREENS {
-        let table: Vec<&Binding> = keymap
-            .global
-            .iter()
-            .chain(keymap.screen_bindings(screen))
+        let table: Vec<(Target, &[Chord])> = keymap
+            .targets_on(screen)
+            .map(|(action, chords)| (Target::of(action), chords))
             .collect();
-        for (i, a) in table.iter().enumerate() {
-            for b in &table[i + 1..] {
-                if a.command == b.command {
+        for (i, (a, a_chords)) in table.iter().enumerate() {
+            for (b, b_chords) in &table[i + 1..] {
+                if a == b {
                     continue;
                 }
-                let Some(chord) = a
-                    .chords
-                    .iter()
-                    .find(|ca| b.chords.iter().any(|cb| same_chord(ca, cb)))
-                else {
+                let Some((ca, cb)) = a_chords.iter().find_map(|ca| {
+                    b_chords
+                        .iter()
+                        .find(|cb| same_chord(ca, cb) || starts(ca, cb) || starts(cb, ca))
+                        .map(|cb| (ca, cb))
+                }) else {
                     continue;
                 };
-                for (this, other) in [(a, b), (b, a)] {
-                    let Some(index) = index_of(this.command) else {
+                for (this, mine, other, theirs) in [(a, ca, b, cb), (b, cb, a, ca)] {
+                    let Some(index) = index_of(*this) else {
                         continue;
                     };
                     if rejected.iter().any(|(i, _)| *i == index) {
                         continue;
                     }
-                    rejected.push((
-                        index,
+                    let other_name = other.config_name().unwrap_or("another command");
+                    let reason = if same_chord(mine, theirs) {
                         format!(
-                            "`{}` already runs `{}` on {}",
-                            super::format_chord(chord),
-                            other.command.config_name().unwrap_or("another command"),
-                            screen_name(screen)
-                        ),
-                    ));
+                            "`{}` already runs `{other_name}`",
+                            super::format_chord(mine)
+                        )
+                    } else if starts(mine, theirs) {
+                        format!(
+                            "`{}` starts `{}`, which runs `{other_name}`",
+                            super::format_chord(mine),
+                            super::format_chord(theirs)
+                        )
+                    } else {
+                        format!(
+                            "`{}` starts with `{}`, which already runs `{other_name}`",
+                            super::format_chord(mine),
+                            super::format_chord(theirs)
+                        )
+                    };
+                    rejected.push((index, format!("{reason} on {}", screen_name(screen))));
                 }
             }
         }
@@ -347,7 +445,7 @@ mod tests {
         assert_eq!(
             problems,
             [
-                "keys.bogus: no command is named `bogus`",
+                "keys.bogus: no command or motion is named `bogus`",
                 "keys.filter: expected a key or a list of keys",
                 "keys.help: `j` is handled by Directory Tree itself and cannot be bound",
                 "keys.quit: `shift+q`: write an uppercase letter or the shifted symbol instead of `shift+`",
@@ -404,5 +502,128 @@ mod tests {
         assert_eq!(problems, Vec::<String>::new());
         assert_eq!(keymap.hint(Command::Refresh), "Backspace");
         assert_eq!(keymap.hint(Command::Help), "? / F1");
+    }
+
+    fn key(code: KeyCode, modifiers: KeyModifiers) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, modifiers)
+    }
+
+    /// Motions have no default keys; `[keys]` binds them on the Directory Tree
+    /// and File Diff, and nowhere else.
+    #[test]
+    fn motions_bind_on_the_tree_and_the_diff() {
+        let (keymap, problems) = remap(
+            "first_row = \"home\"\nlast_row = [\"G\", \"end\"]\nhalf_page_down = \"ctrl+d\"\npage_down = \"pagedown\"\n",
+        );
+        assert_eq!(problems, Vec::<String>::new());
+        for screen in [ViewMode::DirectoryTree, ViewMode::FileDiff] {
+            assert_eq!(
+                keymap.action_for_key(screen, &key(KeyCode::Home, KeyModifiers::NONE)),
+                Some(KeyAction::Gesture(Gesture::Top))
+            );
+            assert_eq!(
+                keymap.action_for_key(screen, &press('G')),
+                Some(KeyAction::Gesture(Gesture::Bottom))
+            );
+            assert_eq!(
+                keymap.action_for_key(screen, &key(KeyCode::Char('d'), KeyModifiers::CONTROL)),
+                Some(KeyAction::Gesture(Gesture::HalfPageDown))
+            );
+            assert_eq!(
+                keymap.action_for_key(screen, &key(KeyCode::PageDown, KeyModifiers::NONE)),
+                Some(KeyAction::Gesture(Gesture::PageDown))
+            );
+        }
+        assert_eq!(
+            keymap.action_for_key(ViewMode::Help, &press('G')),
+            None,
+            "motions do not reach Help"
+        );
+        assert_eq!(
+            keymap.motion_hint(Gesture::Bottom),
+            Some("G / End".to_string())
+        );
+        assert_eq!(keymap.motion_hint(Gesture::HalfPageUp), None);
+        assert_eq!(
+            Keymap::default().action_for_key(ViewMode::DirectoryTree, &press('G')),
+            None,
+            "a motion has no key until `[keys]` gives it one"
+        );
+    }
+
+    /// `"g g"` is a two-key sequence: the first `g` only starts it, and the
+    /// pair resolves to the motion. Commands take sequences the same way.
+    #[test]
+    fn a_two_key_sequence_binds_a_motion_or_a_command() {
+        let (keymap, problems) = remap("first_row = \"g g\"\nrescan = \"g r\"\n");
+        assert_eq!(problems, Vec::<String>::new());
+        let tree = ViewMode::DirectoryTree;
+        assert!(keymap.starts_sequence(tree, &press('g')));
+        assert_eq!(keymap.action_for_key(tree, &press('g')), None);
+        assert_eq!(
+            keymap.action_after(tree, &press('g'), &press('g')),
+            Some(KeyAction::Gesture(Gesture::Top))
+        );
+        assert_eq!(
+            keymap.action_after(tree, &press('g'), &press('r')),
+            Some(KeyAction::Command(Command::Refresh))
+        );
+        assert_eq!(keymap.action_after(tree, &press('g'), &press('x')), None);
+        assert_eq!(keymap.motion_hint(Gesture::Top), Some("g g".to_string()));
+        assert_eq!(keymap.hint(Command::Refresh), "g r");
+        // `r` alone no longer rescans; it is not a sequence's first key either.
+        assert_eq!(keymap.action_for_key(tree, &press('r')), None);
+        assert!(!keymap.starts_sequence(tree, &press('r')));
+    }
+
+    /// A sequence's first key cannot also run something on its own, or one of
+    /// the two could never run.
+    #[test]
+    fn a_sequence_cannot_start_with_a_bound_key() {
+        let (keymap, problems) = remap("first_row = \"s s\"\n");
+        assert_eq!(
+            problems,
+            ["keys.first_row: `s s` starts with `s`, which already runs `swap_sides` on Directory Tree"]
+        );
+        assert_eq!(keymap.motion_hint(Gesture::Top), None);
+
+        let (_, problems) = remap("first_row = [\"g\", \"g g\"]\n");
+        assert_eq!(
+            problems,
+            ["keys.first_row: `g` cannot both be a key and start a sequence"]
+        );
+
+        let (_, problems) = remap("first_row = \"j j\"\n");
+        assert_eq!(
+            problems,
+            ["keys.first_row: `j` is handled by Directory Tree itself and cannot be bound"]
+        );
+
+        let (_, problems) = remap("first_row = \"g g g\"\n");
+        assert_eq!(
+            problems,
+            ["keys.first_row: `g g g`: a sequence is at most two keys"]
+        );
+
+        // The space bar on its own is still a key, not an empty sequence.
+        let (_, problems) = remap("rescan = \" \"\n");
+        assert_eq!(
+            problems,
+            ["keys.rescan: `Space` is handled by Directory Tree itself and cannot be bound"]
+        );
+    }
+
+    /// Two entries that clash through a sequence are both dropped.
+    #[test]
+    fn a_key_and_a_sequence_it_starts_reject_each_other() {
+        let (keymap, problems) = remap("first_row = \"g g\"\nlast_row = \"g\"\n");
+        assert_eq!(
+            problems,
+            [
+                "keys.first_row: `g g` starts with `g`, which already runs `last_row` on Directory Tree",
+                "keys.last_row: `g` starts `g g`, which runs `first_row` on Directory Tree",
+            ]
+        );
+        assert!(keymap.motions.is_empty());
     }
 }

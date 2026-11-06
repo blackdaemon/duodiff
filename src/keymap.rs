@@ -15,19 +15,23 @@ mod gestures;
 mod overrides;
 
 #[cfg(test)]
+pub(crate) use gestures::motion_names;
+#[cfg(test)]
 pub(crate) use gestures::shown_keys as gesture_keys;
 pub use gestures::Gesture;
 
-/// One keyboard chord bound to a [`Command`].
+/// One keyboard chord bound to a [`Command`] or a [`Gesture`] motion.
 ///
 /// `shown` marks whether the chord appears in a display hint: an alias or an
 /// Alt chord still routes but stays out of the hint, so a Command keeps
-/// naming one key even when several chords reach it.
+/// naming one key even when several chords reach it. `prefix` makes it the
+/// second key of a two-key sequence such as `g g`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Chord {
     pub code: KeyCode,
     pub modifiers: KeyModifiers,
     pub shown: bool,
+    pub prefix: Option<(KeyCode, KeyModifiers)>,
 }
 
 impl Chord {
@@ -36,6 +40,7 @@ impl Chord {
             code,
             modifiers: KeyModifiers::NONE,
             shown: true,
+            prefix: None,
         }
     }
 
@@ -44,6 +49,7 @@ impl Chord {
             code,
             modifiers: KeyModifiers::NONE,
             shown: false,
+            prefix: None,
         }
     }
 
@@ -52,7 +58,18 @@ impl Chord {
             code,
             modifiers: KeyModifiers::ALT,
             shown: false,
+            prefix: None,
         }
+    }
+
+    /// The first key of this chord's sequence, as a chord of its own.
+    fn prefix_chord(&self) -> Option<Chord> {
+        self.prefix.map(|(code, modifiers)| Chord {
+            code,
+            modifiers,
+            shown: true,
+            prefix: None,
+        })
     }
 }
 
@@ -68,6 +85,14 @@ pub enum KeyAction {
 #[derive(Clone, Debug)]
 pub struct Binding {
     pub command: Command,
+    pub chords: Vec<Chord>,
+}
+
+/// A motion gesture and the chords `[keys]` gave it. Motions have no default
+/// keys, so every one comes from the config.
+#[derive(Clone, Debug)]
+pub struct MotionBinding {
+    pub gesture: Gesture,
     pub chords: Vec<Chord>,
 }
 
@@ -88,6 +113,8 @@ pub struct Keymap {
     pub(crate) file_diff: Vec<Binding>,
     pub(crate) config_menu: Vec<Binding>,
     pub(crate) help: Vec<Binding>,
+    /// Motions bound by `[keys]`, on [`gestures::MOTION_SCREENS`].
+    pub(crate) motions: Vec<MotionBinding>,
     /// Commands whose chords come from the `[keys]` config section rather
     /// than the defaults, so prose that names a default-only alias can drop it.
     pub(crate) customized: Vec<Command>,
@@ -115,16 +142,81 @@ impl Keymap {
         ]
     }
 
-    /// What a key press resolves to on `view_mode`: a gesture first, since
-    /// `[keys]` cannot bind one, then the global table, then the screen's.
+    /// What a key press resolves to on `view_mode`: a fixed gesture first,
+    /// since `[keys]` cannot bind one, then a bound motion, then the global
+    /// table, then the screen's.
     pub fn action_for_key(&self, view_mode: ViewMode, key: &KeyEvent) -> Option<KeyAction> {
         gestures::gesture_on(view_mode, key.code, key.modifiers)
             .map(KeyAction::Gesture)
             .or_else(|| {
-                self.global_command_for_key(key)
-                    .or_else(|| self.command_for_key(view_mode, key))
-                    .map(KeyAction::Command)
+                self.targets_on(view_mode)
+                    .find(|(_, chords)| chords.iter().any(|chord| chord_matches(chord, key)))
+                    .map(|(action, _)| action)
             })
+    }
+
+    /// What `key` resolves to as the second key of a sequence that `prefix`
+    /// started on `view_mode`, if any.
+    pub fn action_after(
+        &self,
+        view_mode: ViewMode,
+        prefix: &KeyEvent,
+        key: &KeyEvent,
+    ) -> Option<KeyAction> {
+        self.targets_on(view_mode)
+            .find(|(_, chords)| {
+                chords
+                    .iter()
+                    .any(|chord| sequence_matches(chord, prefix, key))
+            })
+            .map(|(action, _)| action)
+    }
+
+    /// Whether `key` is the first key of a sequence bound on `view_mode`, so
+    /// the adapter waits for the next key instead of acting on this one.
+    pub fn starts_sequence(&self, view_mode: ViewMode, key: &KeyEvent) -> bool {
+        self.targets_on(view_mode).any(|(_, chords)| {
+            chords.iter().any(|chord| {
+                chord
+                    .prefix_chord()
+                    .is_some_and(|first| chord_matches(&first, key))
+            })
+        })
+    }
+
+    /// Every bindable target on `view_mode` with its chords, in lookup order:
+    /// motions, then the global table, then the screen's.
+    fn targets_on(&self, view_mode: ViewMode) -> impl Iterator<Item = (KeyAction, &[Chord])> {
+        let motions = if gestures::MOTION_SCREENS.contains(&view_mode) {
+            self.motions.as_slice()
+        } else {
+            &[]
+        };
+        motions
+            .iter()
+            .map(|m| (KeyAction::Gesture(m.gesture), m.chords.as_slice()))
+            .chain(
+                self.global
+                    .iter()
+                    .chain(self.screen_bindings(view_mode))
+                    .map(|b| (KeyAction::Command(b.command), b.chords.as_slice())),
+            )
+    }
+
+    /// The display hint for a bound motion, its chords joined with " / ";
+    /// `None` while `[keys]` gives it no key.
+    pub fn motion_hint(&self, gesture: Gesture) -> Option<String> {
+        self.motions
+            .iter()
+            .find(|m| m.gesture == gesture)
+            .map(|m| {
+                m.chords
+                    .iter()
+                    .map(format_chord)
+                    .collect::<Vec<_>>()
+                    .join(" / ")
+            })
+            .filter(|hint| !hint.is_empty())
     }
 
     /// The Command a key press resolves to on `view_mode`'s own table, if any.
@@ -180,7 +272,17 @@ impl Keymap {
 }
 
 fn chord_matches(chord: &Chord, key: &KeyEvent) -> bool {
-    key.code == chord.code && key.modifiers & SIGNIFICANT_MODIFIERS == chord.modifiers
+    chord.prefix.is_none()
+        && key.code == chord.code
+        && key.modifiers & SIGNIFICANT_MODIFIERS == chord.modifiers
+}
+
+fn sequence_matches(chord: &Chord, prefix: &KeyEvent, key: &KeyEvent) -> bool {
+    chord
+        .prefix_chord()
+        .is_some_and(|first| chord_matches(&first, prefix))
+        && key.code == chord.code
+        && key.modifiers & SIGNIFICANT_MODIFIERS == chord.modifiers
 }
 
 fn command_in(table: &[Binding], key: &KeyEvent) -> Option<Command> {
@@ -193,9 +295,16 @@ fn command_in(table: &[Binding], key: &KeyEvent) -> Option<Command> {
 /// One chord's display label: `Char('l')` → "l", `Char(' ')` → "Space",
 /// `Right` → "Right", `Enter` →
 /// "Enter", `Tab` → "Tab", `Esc` → "Esc", Alt+Down → "Alt+Down", Ctrl+x →
-/// "Ctrl+x". Reproduces every hint the fixed tables printed before this
-/// module owned them (Issue #339).
+/// "Ctrl+x", and a sequence as its two keys apart: "g g". Reproduces every
+/// hint the fixed tables printed before this module owned them (Issue #339).
 fn format_chord(chord: &Chord) -> String {
+    if let Some(first) = chord.prefix_chord() {
+        let second = Chord {
+            prefix: None,
+            ..*chord
+        };
+        return format!("{} {}", format_chord(&first), format_chord(&second));
+    }
     let key = match chord.code {
         KeyCode::Char(' ') => "Space".to_string(),
         KeyCode::Char(c) => c.to_string(),
@@ -443,6 +552,7 @@ impl Default for Keymap {
             file_diff: file_diff_bindings(),
             config_menu: config_menu_bindings(),
             help: help_bindings(),
+            motions: Vec::new(),
             customized: Vec::new(),
         }
     }

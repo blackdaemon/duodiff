@@ -1077,7 +1077,10 @@ mod tests {
             assert_eq!(Command::from_config_name(name), Some(binding.command));
         }
 
-        let mut names: Vec<&str> = Command::config_names().collect();
+        // Motions share the `[keys]` namespace, so a name picks one or the other.
+        let mut names: Vec<&str> = Command::config_names()
+            .chain(crate::keymap::motion_names())
+            .collect();
         let listed = names.len();
         names.sort_unstable();
         names.dedup();

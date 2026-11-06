@@ -501,6 +501,37 @@ impl FileDiffState {
         self.scroll = self.scroll.saturating_sub(self.page_step());
     }
 
+    /// Half-page down, stopping at [`FileDiffState::max_scroll`]. See
+    /// [`FileDiffState::scroll_down`] on `nav_row`.
+    pub(crate) fn half_page_down(&mut self) {
+        self.nav_row = None;
+        self.scroll = (self.scroll + self.half_page_step()).min(self.max_scroll());
+    }
+
+    /// Half-page up, no-op past the top. See [`FileDiffState::scroll_down`]
+    /// on `nav_row`.
+    pub(crate) fn half_page_up(&mut self) {
+        self.nav_row = None;
+        self.scroll = self.scroll.saturating_sub(self.half_page_step());
+    }
+
+    fn half_page_step(&self) -> usize {
+        (self.visible_height / 2).max(1)
+    }
+
+    /// Scroll to the first row. See [`FileDiffState::scroll_down`] on `nav_row`.
+    pub(crate) fn scroll_to_top(&mut self) {
+        self.nav_row = None;
+        self.scroll = 0;
+    }
+
+    /// Scroll to [`FileDiffState::max_scroll`]. See
+    /// [`FileDiffState::scroll_down`] on `nav_row`.
+    pub(crate) fn scroll_to_bottom(&mut self) {
+        self.nav_row = None;
+        self.scroll = self.max_scroll();
+    }
+
     /// Horizontal step left, when wrap is off (no-op while wrapping or at the
     /// left edge).
     pub(crate) fn h_scroll_left(&mut self) {
@@ -630,6 +661,27 @@ impl FileDiffState {
 mod tests {
     use super::*;
     use crate::test_support::{deleted_row, equal_row};
+
+    #[test]
+    fn test_diff_half_page_and_top_bottom() {
+        let mut diff = FileDiffState::default();
+        diff.set_rows((0..30).map(|_| equal_row("x")).collect());
+        diff.set_text_frame(10, 0); // half_page_step = 5, max_scroll = 20
+        diff.set_scroll(0);
+
+        diff.half_page_down();
+        assert_eq!(diff.scroll(), 5);
+        diff.half_page_up();
+        assert_eq!(diff.scroll(), 0);
+
+        diff.scroll_to_bottom();
+        assert_eq!(diff.scroll(), 20);
+        diff.half_page_down();
+        assert_eq!(diff.scroll(), 20);
+
+        diff.scroll_to_top();
+        assert_eq!(diff.scroll(), 0);
+    }
 
     #[test]
     fn test_diff_page_down_up() {

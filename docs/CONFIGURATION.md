@@ -19,6 +19,7 @@ fix it. `duodiff --check` reports the same problem and exits non-zero.
 | `mouse` | bool | `true` | Mouse support (click, scroll, double-click). `--no-mouse` starts one session with it off; turning it on in the Config screen replaces the flag and saves. |
 | `theme` | string | `"dark"` | Colour theme: `"dark"` or `"light"`. `T` toggles and persists it. |
 | `diff_context` | integer | `3` | Unchanged context lines shown around each hunk in the collapsed File Diff view (`f` toggles full vs. collapsed). |
+| `scrolloff` | integer | `5` | Rows the Directory Tree cursor keeps from the top and bottom of the list when moved by keyboard or wheel; past them the list scrolls instead, until it reaches either end. Capped at half the visible rows; `0` lets the cursor reach the edge. Same meaning and default as yazi's `scrolloff`. |
 | `scan_mode` | string | `"fast"` | Scan mode: `"fast"` (size + mtime) or `"precise"` (streaming SHA-256). Change it with `c`, the Config screen, or the palette — all persist. `--scan-mode <fast\|precise>` overrides it for one session without writing the file. |
 | `respect_gitignore` | bool | `true` | Read each root's nested `.gitignore` rules. `--gitignore` / `--no-gitignore` override it for one session without writing the file, until you change it in the Config screen. |
 | `global_exclusions` | string list | built-in VCS/junk list | Rules for both roots, applied before their `.gitignore` and `.duodiffignore` rules. Set `[]` to disable the defaults; repeated `--exclude` patterns are session-only and take precedence. |
@@ -37,7 +38,8 @@ save_staged = []
 ```
 
 - Your keys **replace** that command's default keys on every screen that has
-  the command. `[]` leaves it with no key; every command stays reachable from
+  the command. A [motion](#motion-names) has no default keys, so your keys are
+  its only ones. `[]` leaves it with no key; every command stays reachable from
   the Command Palette (`;` or `Ctrl+p`).
 - Help, the footers, the top bar, and the Command Palette show your keys.
 - Changes take effect the next time duodiff starts. The Config screen shows how
@@ -52,6 +54,10 @@ save_staged = []
   `insert`, `space`, `up`, `down`, `left`, `right`, `home`, `end`, `pageup`,
   `pagedown`, `f1` … `f12`.
 - Modifiers go in front: `ctrl+x`, `alt+down`, `ctrl+alt+enter`.
+- Two keys separated by a space are a sequence, pressed one after the other:
+  `"g g"`, `"g ctrl+r"`. The first key only starts the sequence, so it cannot
+  also run something on its own on that screen; any other second key ends the
+  sequence and acts as itself.
 
 ### Keys that cannot be bound
 
@@ -75,11 +81,13 @@ clear an applied filter; in Help, `enter` and `tab` pick topics.
 
 An entry is ignored as a whole, and its command keeps its default keys, when:
 
-- the name is not a command below, or the value is not a key or a list of keys;
+- the name is not a command or motion below, or the value is not a key or a
+  list of keys;
 - a key cannot be read, or is one duodiff handles itself (above);
-- a key already runs another command on the same screen. If that other
-  command's key is a default, only your entry is ignored; if both are your
-  entries, both are. Rebind the other command too to free its key.
+- a key already runs another command or motion on the same screen, or is the
+  first key of another's sequence. If that other key is a default, only your
+  entry is ignored; if both are your entries, both are. Rebind the other
+  command too to free its key.
 
 duodiff names the first ignored entry in a toast when it starts, and
 `duodiff --check` lists every one and exits non-zero. A save from the Config
@@ -120,3 +128,28 @@ screen writes `[keys]` back as you wrote it, ignored entries included.
 | `help` | `?` | Open Help |
 | `back` | `Esc`, `q` (and `?` in Help) | Go back |
 | `quit` | `q`, `Esc` | Quit (Directory Tree) |
+
+### Motion names
+
+Motions move the selection in the Directory Tree and scroll File Diff. They
+have no default keys, are not Commands, and do not appear in the Command
+Palette; bind them here to use them.
+
+```toml
+[keys]
+first_row = ["g g", "home"]
+last_row = ["G", "end"]
+half_page_down = "ctrl+d"
+half_page_up = "ctrl+u"
+page_down = "pagedown"
+page_up = "pageup"
+```
+
+| Name | Motion |
+| --- | --- |
+| `first_row` | Jump to the first row (Directory Tree) or the top (File Diff) |
+| `last_row` | Jump to the last row (Directory Tree) or the bottom (File Diff) |
+| `half_page_down` | Move down half a screen |
+| `half_page_up` | Move up half a screen |
+| `page_down` | Move down one screen, alongside the fixed `ctrl+f` |
+| `page_up` | Move up one screen, alongside the fixed `ctrl+b` |

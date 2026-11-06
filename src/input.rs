@@ -103,6 +103,9 @@ pub async fn handle_key_with_commands<B: ratatui::backend::Backend>(
 where
     B::Error: 'static,
 {
+    // A held sequence key only ever pairs with the very next key.
+    let pending_key = app.take_pending_key();
+
     // Confirm modal traps all input until dismissed — checked before every other
     // shortcut (including the command palette and theme toggle below) so it behaves
     // identically regardless of which ViewMode it was opened from. Mirrors
@@ -244,7 +247,18 @@ where
         app::ViewMode::FileDiff | app::ViewMode::ConfigMenu => {}
     }
 
-    match app.keymap().action_for_key(app.view_mode(), &key) {
+    let keymap = app.keymap();
+    let view_mode = app.view_mode();
+    let action = match pending_key.and_then(|prefix| keymap.action_after(view_mode, &prefix, &key))
+    {
+        Some(action) => Some(action),
+        None if keymap.starts_sequence(view_mode, &key) => {
+            app.set_pending_key(key);
+            return Ok(());
+        }
+        None => keymap.action_for_key(view_mode, &key),
+    };
+    match action {
         Some(KeyAction::Gesture(gesture)) => run_gesture(gesture, app, terminal, commands)?,
         Some(KeyAction::Command(command)) => run_command(command, app, terminal, commands)?,
         None => {}
@@ -271,6 +285,10 @@ where
         (DirectoryTree, Gesture::MoveUp) => app.directory_tree_mut().select_prev(),
         (DirectoryTree, Gesture::PageDown) => app.directory_tree_mut().page_down(),
         (DirectoryTree, Gesture::PageUp) => app.directory_tree_mut().page_up(),
+        (DirectoryTree, Gesture::HalfPageDown) => app.directory_tree_mut().half_page_down(),
+        (DirectoryTree, Gesture::HalfPageUp) => app.directory_tree_mut().half_page_up(),
+        (DirectoryTree, Gesture::Top) => app.directory_tree_mut().select_first(),
+        (DirectoryTree, Gesture::Bottom) => app.directory_tree_mut().select_last(),
         // Space on a file row has nothing to expand.
         (DirectoryTree, Gesture::Toggle) => {
             if app.selected_row().is_some_and(|row| row.is_dir()) {
@@ -281,6 +299,10 @@ where
         (FileDiff, Gesture::MoveUp) => app.diff_mut().scroll_up(),
         (FileDiff, Gesture::PageDown) => app.diff_mut().page_down(),
         (FileDiff, Gesture::PageUp) => app.diff_mut().page_up(),
+        (FileDiff, Gesture::HalfPageDown) => app.diff_mut().half_page_down(),
+        (FileDiff, Gesture::HalfPageUp) => app.diff_mut().half_page_up(),
+        (FileDiff, Gesture::Top) => app.diff_mut().scroll_to_top(),
+        (FileDiff, Gesture::Bottom) => app.diff_mut().scroll_to_bottom(),
         (FileDiff, Gesture::ScrollLeft) => app.diff_mut().h_scroll_left(),
         (FileDiff, Gesture::ScrollRight) => app.diff_mut().h_scroll_right(),
         (ConfigMenu, Gesture::MoveDown) => app.config_gesture(ConfigGesture::MoveDown),
@@ -2270,6 +2292,63 @@ mod tests {
             !app.directory_tree().editing_diffs_only(),
             "plain `f`/`F` must not toggle diffs-only any more"
         );
+    }
+
+    /// A `[keys]` sequence runs only when its two keys are consecutive; any
+    /// other key in between abandons it and acts on its own.
+    #[tokio::test]
+    async fn test_a_configured_sequence_needs_consecutive_keys() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use ratatui::backend::TestBackend;
+        use ratatui::Terminal;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new(PathBuf::from("left"), PathBuf::from("right"));
+        let keys: toml::Table = "first_row = \"g g\"\nlast_row = [\"G\", \"end\"]\n"
+            .parse()
+            .unwrap();
+        app.set_keymap(crate::keymap::Keymap::with_overrides(&keys).0);
+        app.directory_tree_mut().set_flat_rows(
+            (0..10)
+                .map(|i| app::FlatRow {
+                    relative_path: PathBuf::from(format!("f{i}.txt")),
+                    name: format!("f{i}.txt"),
+                    ..Default::default()
+                })
+                .collect(),
+        );
+        app.directory_tree_mut().refresh_for_test(false);
+        let (tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut press = async |code: KeyCode, app: &mut App| {
+            handle_key(
+                KeyEvent::new(code, KeyModifiers::empty()),
+                app,
+                &mut terminal,
+                tx.clone(),
+            )
+            .await
+            .unwrap();
+        };
+
+        press(KeyCode::Char('G'), &mut app).await;
+        assert_eq!(app.directory_tree().selected_idx(), 9);
+
+        press(KeyCode::Char('g'), &mut app).await;
+        press(KeyCode::Char('k'), &mut app).await;
+        assert_eq!(
+            app.directory_tree().selected_idx(),
+            8,
+            "`k` after a lone `g` still moves up"
+        );
+        press(KeyCode::Char('g'), &mut app).await;
+        assert_eq!(app.directory_tree().selected_idx(), 8);
+
+        press(KeyCode::Char('g'), &mut app).await;
+        assert_eq!(app.directory_tree().selected_idx(), 0);
+
+        press(KeyCode::End, &mut app).await;
+        assert_eq!(app.directory_tree().selected_idx(), 9);
     }
 
     /// Issue #236: diffs-only moved to `Ctrl+f`, and commits together with the query.

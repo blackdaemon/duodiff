@@ -6,18 +6,28 @@
 //! Only unconditional gestures live here. Keys the adapter takes in some
 //! states only — `Enter` on a directory, `Esc` / `Backspace` while a filter is
 //! applied, Help's `Enter` and `Tab` — stay in the adapter and stay bindable.
+//!
+//! The motions in [`MOTIONS`] are gestures too, but with no fixed key: only
+//! `[keys]` binds them, so a user who wants `G` or `Home` opts in.
 
 use crate::app::ViewMode;
 use crossterm::event::{KeyCode, KeyModifiers};
 
 /// A navigation intent the keyboard adapter carries out on the current screen.
-/// Not a Command: it has no Palette entry and cannot be remapped (ADR-0003).
+/// Not a Command: it has no Palette entry (ADR-0003). Its fixed keys cannot be
+/// remapped; a motion takes extra keys from `[keys]`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Gesture {
     MoveDown,
     MoveUp,
     PageDown,
     PageUp,
+    HalfPageDown,
+    HalfPageUp,
+    /// Jump to the first row.
+    Top,
+    /// Jump to the last row.
+    Bottom,
     ScrollLeft,
     ScrollRight,
     /// Expand or collapse the selected directory.
@@ -81,6 +91,42 @@ const fn entry(
         modifiers,
         gesture,
     }
+}
+
+/// The screens a motion bound in `[keys]` moves on.
+pub(crate) const MOTION_SCREENS: [ViewMode; 2] = [ViewMode::DirectoryTree, ViewMode::FileDiff];
+
+/// Each motion's name in the `[keys]` config section. Spelled out, like the
+/// Command names, so renaming a variant never breaks a user's config.
+const MOTIONS: &[(Gesture, &str)] = &[
+    (Gesture::Top, "first_row"),
+    (Gesture::Bottom, "last_row"),
+    (Gesture::HalfPageDown, "half_page_down"),
+    (Gesture::HalfPageUp, "half_page_up"),
+    (Gesture::PageDown, "page_down"),
+    (Gesture::PageUp, "page_up"),
+];
+
+/// The motion a `[keys]` name refers to.
+pub(crate) fn motion_from_config_name(name: &str) -> Option<Gesture> {
+    MOTIONS
+        .iter()
+        .find(|(_, candidate)| *candidate == name)
+        .map(|(gesture, _)| *gesture)
+}
+
+/// A motion's `[keys]` name; `None` for a gesture `[keys]` cannot bind.
+pub(crate) fn motion_config_name(gesture: Gesture) -> Option<&'static str> {
+    MOTIONS
+        .iter()
+        .find(|(candidate, _)| *candidate == gesture)
+        .map(|(_, name)| *name)
+}
+
+/// Every motion's `[keys]` name, in documentation order.
+#[cfg(test)]
+pub(crate) fn motion_names() -> impl Iterator<Item = &'static str> {
+    MOTIONS.iter().map(|(_, name)| *name)
 }
 
 const TREE: Option<ViewMode> = Some(ViewMode::DirectoryTree);
@@ -155,6 +201,7 @@ pub(crate) fn shown_keys() -> impl Iterator<Item = (Option<ViewMode>, String)> {
             code: e.code,
             modifiers: e.modifiers.shown(),
             shown: true,
+            prefix: None,
         };
         (e.screen, super::format_chord(&chord))
     })

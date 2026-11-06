@@ -53,6 +53,7 @@ Each pane's bottom border shows the selected row as `n/N` among currently visibl
 | `k` / `Up` | Move selection up |
 | `Ctrl+f` | Page selection down (about one screen) |
 | `Ctrl+b` | Page selection up (about one screen) |
+| *(unbound)* | **Motions** — first row, last row, half page, page — have no default keys. Bind them, for example `gg` / `Home`, `G` / `End`, `Ctrl+u` / `Ctrl+d`, in `[keys]`; see [Motion names](CONFIGURATION.md#motion-names). Help lists the ones you bound. |
 | `h` / `Left` | Collapse selected directory |
 | `l` / `Right` | Expand selected directory |
 | `Space` | Toggle directory expansion (collapse if expanded, expand if collapsed) |
@@ -102,6 +103,7 @@ The built-in viewer only accepts UTF-8 text files up to **10 MiB** per side. B
 | `k` / `Up` | Scroll diff content up by one line |
 | `Ctrl+f` | Page scroll diff content down (about one screen) |
 | `Ctrl+b` | Page scroll diff content up (about one screen) |
+| *(unbound)* | **Motions** — top, bottom, half page, page — the same `[keys]` bindings as the Directory Tree. |
 | `Left` / `Right` | Scroll diff content horizontally (only when line wrap is disabled) |
 | `N` / `Alt+Down` | Jump to the next change block (skips unchanged lines) |
 | `P` / `Alt+Up` | Jump to the previous change block (skips unchanged lines) |

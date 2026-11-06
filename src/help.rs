@@ -74,6 +74,21 @@ fn default_alias(
     }
 }
 
+/// One Help line per motion `[keys]` binds, in `labels` order; none while
+/// the motion has no key, since motions have no defaults.
+fn motion_lines(
+    keymap: &crate::keymap::Keymap,
+    labels: &[(crate::keymap::Gesture, &str)],
+) -> String {
+    labels
+        .iter()
+        .filter_map(|(gesture, label)| {
+            let key = keymap.motion_hint(*gesture)?;
+            Some(format!("  {}{label}\n", help_key_col(&key, HELP_COL)))
+        })
+        .collect()
+}
+
 /// `help_key_col(help_key(keymap, command), HELP_COL)`.
 fn help_line_key(keymap: &crate::keymap::Keymap, command: crate::commands::Command) -> String {
     help_key_col(&help_key(keymap, command), HELP_COL)
@@ -88,6 +103,7 @@ pub fn topic_lines(
     keymap: &crate::keymap::Keymap,
 ) -> Vec<HelpLine> {
     use crate::commands::Command;
+    use crate::keymap::Gesture;
     match topic {
         HelpTopic::DirectoryTree => text_lines(&format!(
             "  Scanning       centered progress window: animation, elapsed seconds,
@@ -98,7 +114,7 @@ Navigation
   k / Up         move selection up
   Ctrl+f         page selection down (about one screen)
   Ctrl+b         page selection up (about one screen)
-  {collapse}collapse the selected directory
+{motions}  {collapse}collapse the selected directory
   {expand}expand the selected directory
   Space          toggle expand/collapse
   {collapse_expand_all}collapse / expand every directory{expand_all_alias}
@@ -148,6 +164,17 @@ Actions
   {quit}quit",
             collapse = help_line_key(keymap, Command::Collapse),
             expand = help_line_key(keymap, Command::Expand),
+            motions = motion_lines(
+                keymap,
+                &[
+                    (Gesture::PageDown, "page selection down"),
+                    (Gesture::PageUp, "page selection up"),
+                    (Gesture::HalfPageDown, "move selection down half a screen"),
+                    (Gesture::HalfPageUp, "move selection up half a screen"),
+                    (Gesture::Top, "jump to the first row"),
+                    (Gesture::Bottom, "jump to the last row"),
+                ]
+            ),
             expand_all_alias = default_alias(keymap, Command::ExpandAll, " (= also expands)"),
             next_prev_difference_alias = if keymap.is_customized(Command::PrevDifference) {
                 String::new()
@@ -206,7 +233,7 @@ Actions
   k / Up         scroll up one line
   Ctrl+f         page scroll down (about one screen)
   Ctrl+b         page scroll up (about one screen)
-  {next_change}jump to next change block
+{motions}  {next_change}jump to next change block
   {prev_change}jump to previous change block
   Left / Right   scroll horizontally (only while wrap is off)
   Gutters        1-based source line numbers; - deleted, + inserted,
@@ -231,6 +258,17 @@ Actions
   {help}show this help
   {quit_or_back}return to the Directory Tree view, or quit when duodiff
                  was started on two files",
+            motions = motion_lines(
+                keymap,
+                &[
+                    (Gesture::PageDown, "page scroll down"),
+                    (Gesture::PageUp, "page scroll up"),
+                    (Gesture::HalfPageDown, "scroll down half a screen"),
+                    (Gesture::HalfPageUp, "scroll up half a screen"),
+                    (Gesture::Top, "jump to the top"),
+                    (Gesture::Bottom, "jump to the bottom"),
+                ]
+            ),
             next_change = help_key_col(
                 &format!(
                     "{}{}",
@@ -420,6 +458,33 @@ mod tests {
                 keys_named(topic)
             );
         }
+    }
+
+    /// Help lists a motion only once `[keys]` binds it, naming its keys.
+    #[test]
+    fn help_lists_the_motions_keys_bind() {
+        let lines = |keymap: &crate::keymap::Keymap, topic| texts(topic, keymap).join("\n");
+        let default = crate::keymap::Keymap::default();
+        assert!(!lines(&default, HelpTopic::DirectoryTree).contains("jump to the last row"));
+
+        let keys: toml::Table = "last_row = [\"G\", \"end\"]\nfirst_row = \"g g\"\n"
+            .parse()
+            .unwrap();
+        let keymap = crate::keymap::Keymap::with_overrides(&keys).0;
+        let tree = lines(&keymap, HelpTopic::DirectoryTree);
+        assert!(
+            tree.contains("  G / End        jump to the last row"),
+            "{tree}"
+        );
+        assert!(
+            tree.contains("  g g            jump to the first row"),
+            "{tree}"
+        );
+        let diff = lines(&keymap, HelpTopic::FileDiff);
+        assert!(
+            diff.contains("  G / End        jump to the bottom"),
+            "{diff}"
+        );
     }
 
     /// About's link is the repository, and hit testing finds it whether or

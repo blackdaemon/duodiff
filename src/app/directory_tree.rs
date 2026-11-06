@@ -127,6 +127,9 @@ pub struct DirectoryTreeState {
     scroll_offset: usize,
     /// Content rows the last frame showed, set by [`crate::view::prepare_frame`].
     visible_height: usize,
+    /// Rows kept between the cursor and the viewport's top and bottom edges
+    /// when the keyboard or wheel moves it (the `scrolloff` setting).
+    scrolloff: usize,
     last_click_idx: Option<usize>,
     last_click_time: Option<std::time::Instant>,
 }
@@ -157,12 +160,39 @@ impl DirectoryTreeState {
         if !self.rows.is_empty() && self.selected_idx < self.rows.len() - 1 {
             self.selected_idx += 1;
         }
+        self.scroll_to_cursor();
     }
 
     pub(crate) fn select_prev(&mut self) {
         if !self.rows.is_empty() && self.selected_idx > 0 {
             self.selected_idx -= 1;
         }
+        self.scroll_to_cursor();
+    }
+
+    /// Set how many rows the cursor keeps from the viewport's edges.
+    pub(crate) fn set_scrolloff(&mut self, rows: usize) {
+        self.scrolloff = rows;
+    }
+
+    /// Scroll so the cursor stays `scrolloff` rows inside the last drawn
+    /// viewport, as far as the list's ends allow. Only cursor moves call this:
+    /// a click must not scroll the row out from under a double-click, so the
+    /// per-frame [`DirectoryTreeState::adjust_scroll`] keeps no margin.
+    fn scroll_to_cursor(&mut self) {
+        let height = self.visible_height;
+        if height == 0 {
+            return;
+        }
+        // At most half the viewport, or the cursor could never sit still.
+        let margin = self.scrolloff.min(height.saturating_sub(1) / 2);
+        if self.selected_idx < self.scroll_offset + margin {
+            self.scroll_offset = self.selected_idx.saturating_sub(margin);
+        } else if self.selected_idx + margin >= self.scroll_offset + height {
+            self.scroll_offset = self.selected_idx + margin + 1 - height;
+        }
+        let max_offset = self.rows.len().saturating_sub(height);
+        self.scroll_offset = self.scroll_offset.min(max_offset);
     }
 
     /// Select row `idx` if in range. Used by mouse left/right click. Does not
@@ -189,7 +219,7 @@ impl DirectoryTreeState {
         }
         let max_idx = self.rows.len() - 1;
         self.selected_idx = (self.selected_idx + self.page_step()).min(max_idx);
-        self.adjust_scroll(self.visible_height);
+        self.scroll_to_cursor();
     }
 
     /// Move the cursor up by one page, then keep it on screen.
@@ -198,7 +228,39 @@ impl DirectoryTreeState {
             return;
         }
         self.selected_idx = self.selected_idx.saturating_sub(self.page_step());
-        self.adjust_scroll(self.visible_height);
+        self.scroll_to_cursor();
+    }
+
+    /// Move the cursor down by half a page, then keep it on screen.
+    pub(crate) fn half_page_down(&mut self) {
+        if self.rows.is_empty() {
+            return;
+        }
+        let max_idx = self.rows.len() - 1;
+        self.selected_idx = (self.selected_idx + self.half_page_step()).min(max_idx);
+        self.scroll_to_cursor();
+    }
+
+    /// Move the cursor up by half a page, then keep it on screen.
+    pub(crate) fn half_page_up(&mut self) {
+        self.selected_idx = self.selected_idx.saturating_sub(self.half_page_step());
+        self.scroll_to_cursor();
+    }
+
+    fn half_page_step(&self) -> usize {
+        (self.visible_height / 2).max(1)
+    }
+
+    /// Move the cursor to the first row.
+    pub(crate) fn select_first(&mut self) {
+        self.selected_idx = 0;
+        self.scroll_to_cursor();
+    }
+
+    /// Move the cursor to the last row.
+    pub(crate) fn select_last(&mut self) {
+        self.selected_idx = self.rows.len().saturating_sub(1);
+        self.scroll_to_cursor();
     }
 
     /// Content rows the last frame showed.
@@ -466,7 +528,7 @@ impl DirectoryTreeState {
         }
         if let Some(idx) = self.rows.iter().position(|row| row.relative_path == target) {
             self.select_row_at(idx);
-            self.adjust_scroll(self.visible_height);
+            self.scroll_to_cursor();
         }
         true
     }
@@ -1088,6 +1150,106 @@ mod tests {
         assert_eq!(tree.selected_idx(), 0);
         tree.select_prev();
         assert_eq!(tree.selected_idx(), 0); // bounds check
+    }
+
+    /// The cursor keeps `scrolloff` rows from either edge while it moves, and
+    /// the list's ends still reach the edge; a click does not scroll.
+    #[test]
+    fn test_scrolloff_keeps_a_margin_around_the_cursor() {
+        let mut tree = DirectoryTreeState::default();
+        let rows: Vec<FlatRow> = (0..30)
+            .map(|i| FlatRow {
+                relative_path: PathBuf::from(format!("f{i}.txt")),
+                name: format!("f{i}.txt"),
+                ..Default::default()
+            })
+            .collect();
+        tree.set_flat_rows(rows);
+        tree.refresh_for_test(false);
+        tree.visible_height = 10;
+        tree.set_scrolloff(3);
+
+        // Rows 0..=6 fit above the bottom margin without scrolling.
+        for _ in 0..6 {
+            tree.select_next();
+        }
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (6, 0));
+        tree.select_next();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (7, 1));
+
+        // Moving back up scrolls only once the cursor is within 3 of the top.
+        for _ in 0..3 {
+            tree.select_prev();
+        }
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (4, 1));
+        tree.select_prev();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (3, 0));
+
+        // The list's ends stop the scroll, so the last row reaches the edge.
+        tree.select_last();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (29, 20));
+        tree.select_first();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (0, 0));
+
+        // A click near the edge leaves the view where it is.
+        assert!(tree.select_row_at(9));
+        tree.adjust_scroll(10);
+        assert_eq!(tree.scroll_offset(), 0);
+
+        // A margin larger than half the view is capped so the cursor can move.
+        tree.set_scrolloff(50);
+        tree.select_first();
+        tree.select_next();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (1, 0));
+        // Capped at (10 - 1) / 2 = 4: row 5 still fits, row 6 scrolls.
+        for _ in 0..4 {
+            tree.select_next();
+        }
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (5, 0));
+        tree.select_next();
+        assert_eq!((tree.selected_idx(), tree.scroll_offset()), (6, 1));
+    }
+
+    #[test]
+    fn test_half_page_and_first_last_move_the_cursor() {
+        let mut tree = DirectoryTreeState::default();
+        let rows: Vec<FlatRow> = (0..20)
+            .map(|i| FlatRow {
+                depth: 0,
+                relative_path: PathBuf::from(format!("f{i}.txt")),
+                name: format!("f{i}.txt"),
+                state: DiffState::Identical,
+                left: None,
+                right: None,
+                ..Default::default()
+            })
+            .collect();
+        tree.set_flat_rows(rows);
+        tree.refresh_for_test(false);
+        tree.visible_height = 6; // half_page_step = 3
+
+        tree.half_page_down();
+        assert_eq!(tree.selected_idx(), 3);
+        tree.half_page_up();
+        assert_eq!(tree.selected_idx(), 0);
+        tree.half_page_up();
+        assert_eq!(tree.selected_idx(), 0);
+
+        tree.select_last();
+        assert_eq!(tree.selected_idx(), 19);
+        assert_eq!(tree.scroll_offset(), 14); // last row at the bottom edge
+        tree.half_page_down();
+        assert_eq!(tree.selected_idx(), 19);
+
+        tree.select_first();
+        assert_eq!(tree.selected_idx(), 0);
+        assert_eq!(tree.scroll_offset(), 0);
+
+        // Empty list is a no-op
+        tree.set_rows(Vec::new());
+        tree.select_last();
+        tree.half_page_down();
+        assert_eq!(tree.selected_idx(), 0);
     }
 
     #[test]

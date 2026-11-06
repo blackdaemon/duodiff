@@ -34,6 +34,11 @@ theme = "dark"
 # `Left`/`Right` on the "Diff context" row) or edit directly here. Default: 3.
 diff_context = 3
 
+# Rows the Directory Tree cursor keeps from the top and bottom of the list;
+# past them the list scrolls instead. Capped at half the visible rows.
+# Default: 5 (the same as yazi's scrolloff).
+scrolloff = 5
+
 # How directory scans decide whether two files match: "fast" (default) compares
 # size and modification time only; "precise" streams a SHA-256 of each side.
 # In fast mode a same-size pair with differing timestamps is `≈` (content
@@ -54,9 +59,13 @@ global_exclusions = [".git/", ".hg/", ".svn/", "node_modules/", ".DS_Store", "Th
 
 # Remap the keys that run a command. Each entry replaces that command's default
 # keys; [] leaves it with no key (the Command Palette, `;`, still runs it).
+# Motions (first_row, last_row, half_page_down, …) have no keys until bound
+# here. Two keys apart ("g g") are a sequence.
 # Names, key syntax, and the keys duodiff keeps for itself are listed in
 # docs/CONFIGURATION.md. Changes take effect on the next start.
 # [keys]
 # copy_to_left = "R"
 # copy_to_right = "L"
 # next_change = ["n", "alt+down"]
+# first_row = ["g g", "home"]
+# last_row = ["G", "end"]

@@ -192,6 +192,9 @@ pub struct AppSettings {
     /// Unchanged context lines kept around each change in the diff view when not
     /// showing the full file (`FileDiffState::show_full`). Adjustable from the Config screen.
     pub diff_context: usize,
+    /// Rows the Directory Tree cursor keeps from the list's top and bottom
+    /// edges; past them the view scrolls instead. yazi's default.
+    pub scrolloff: usize,
     /// Persisted scan mode. Missing in older config files, which `#[serde(default)]`
     /// resolves to `Fast` — the built-in default — with no explicit migration.
     pub scan_mode: ScanMode,
@@ -217,6 +220,7 @@ impl Default for AppSettings {
             mouse: true,
             theme: ThemeChoice::Dark,
             diff_context: 3,
+            scrolloff: 5,
             scan_mode: ScanMode::Fast,
             global_exclusions: vec![
                 ".git/".to_string(),
@@ -867,6 +871,7 @@ mod tests {
             mouse: false,
             theme: ThemeChoice::Dark,
             diff_context: 3,
+            scrolloff: 5,
             scan_mode: ScanMode::Fast,
             global_exclusions: AppSettings::default().global_exclusions,
             respect_gitignore: true,
@@ -899,6 +904,7 @@ mod tests {
             mouse: true,
             theme: crate::theme::ThemeChoice::Light,
             diff_context: 3,
+            scrolloff: 5,
             scan_mode: ScanMode::Fast,
             global_exclusions: AppSettings::default().global_exclusions,
             respect_gitignore: true,
@@ -907,6 +913,16 @@ mod tests {
         let serialized = toml::to_string(&settings).unwrap();
         let parsed: AppSettings = toml::from_str(&serialized).unwrap();
         assert_eq!(parsed.theme, crate::theme::ThemeChoice::Light);
+    }
+
+    #[test]
+    fn scrolloff_defaults_to_yazis_five_and_round_trips() {
+        let parsed: AppSettings = toml::from_str("check_updates = true\n").unwrap();
+        assert_eq!(parsed.scrolloff, 5);
+        let parsed: AppSettings = toml::from_str("scrolloff = 8\n").unwrap();
+        assert_eq!(parsed.scrolloff, 8);
+        let serialized = toml::to_string(&parsed).unwrap();
+        assert!(serialized.contains("scrolloff = 8"), "{serialized}");
     }
 
     #[test]
@@ -923,6 +939,7 @@ mod tests {
             mouse: true,
             theme: ThemeChoice::Dark,
             diff_context: 10,
+            scrolloff: 5,
             scan_mode: ScanMode::Fast,
             global_exclusions: AppSettings::default().global_exclusions,
             respect_gitignore: true,
@@ -971,6 +988,7 @@ mod tests {
             mouse: true,
             theme: ThemeChoice::Dark,
             diff_context: 3,
+            scrolloff: 5,
             scan_mode: ScanMode::Precise,
             global_exclusions: AppSettings::default().global_exclusions,
             respect_gitignore: true,
